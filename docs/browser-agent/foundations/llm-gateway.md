@@ -199,6 +199,14 @@ Generate HTTP endpoint at the smoke-test level (ACK/environment/params), and (b)
 fakes at the gateway-contract level. It has **not** been verified to deliver an actual
 model answer, because no real receiver exists yet to prove that leg.
 
+**This path is now confirmed backend/contract blocked** — a follow-up pass tested 8 query
+param variants (both connection identifiers, both param names, a channel param, and
+alternative `transport` values) against the real backend while watching raw WS frames, and
+no Generate result frame was ever emitted. See
+[`websocket-generate-verification.md`](./websocket-generate-verification.md) for the full
+matrix and the open questions for Claire. Do not implement a `GenerateReceiver` until those
+are answered.
+
 ## 7. Future providers and the proxy backend (TODO)
 
 - **Provider targets behind the same contract:** OpenAI (GPT), Claude, OpenRouter,
@@ -209,9 +217,11 @@ model answer, because no real receiver exists yet to prove that leg.
   HttpRequest port. Not built yet; deliberately deferred until a provider that requires
   it is scheduled.
 - **Generate WebSocket receiver:** the real socket-layer receiver (`libs/socket`) that
-  reassembles `json:manifest`/`json:chunk`/`json:complete` frames into a `GenerateResponse`
-  does not exist yet — see §6.2. This is the actual blocker on a live Generate result via
-  that gateway; §6.1's sync gateway has no such blocker.
+  would reassemble result frames into a `GenerateResponse` does not exist yet — and cannot
+  be written until the backend confirms whether/what it emits. Verified backend-blocked;
+  see §6.2 and [`websocket-generate-verification.md`](./websocket-generate-verification.md).
+  (The `json:manifest`/`json:chunk`/`json:complete` frame names were always speculative and
+  have never been observed.) §6.1's sync gateway has no such blocker.
 - **Capability backfill:** the app's `createCommandLlmGateway` does not declare
   `capabilities` yet (the field is optional for compatibility); worth adding when touched.
 
