@@ -10,7 +10,12 @@ import { withExecutorTracing, withGatewayTracing } from '../utils/agentTracing';
 
 import type { NodeData } from '@lemoncloud/eureka-flows-api';
 
-const HARNESS_FLOW_ID = 'agent-harness';
+// Separate flowId per gateway mode: session/transcript persistence is keyed by flowId, so
+// sharing one would rehydrate the other mode's messages on toggle — including tool-call
+// messages the fake gateway produced, which the real text-only gateway then rejects with
+// "tool messages are not supported". Each mode gets its own persisted transcript instead.
+const HARNESS_FAKE_FLOW_ID = 'agent-harness-fake';
+const HARNESS_REAL_FLOW_ID = 'agent-harness-generate-sync';
 const TEXT_INPUT_NODE: NodeData = { id: 'text-1', type: 'text-input', position: { x: 100, y: 200 } };
 // The live catalog's default and cheaper than gemini-2.5-flash (docs/browser-agent/foundations/
 // real-llm-tool-verification.md §2); that same pass verified this path is real-API text-only —
@@ -34,7 +39,12 @@ export const AgentHarnessPage = () => {
     // the real gateway is an opt-in toggle for manual verification against the live backend.
     const [useRealGateway, setUseRealGateway] = useState(false);
 
-    const binding = useMemo(() => createInMemoryCanvasBinding({ nodes: [{ ...TEXT_INPUT_NODE }], edges: [] }), []);
+    // Each mode also gets its own canvas binding, for the same reason as the flowId split:
+    // the fake mode's scripted move_node is a real ToolExecutor dispatch that actually moves
+    // the node, and that shouldn't bleed into the real (text-only, tool-free) mode's scenario.
+    const fakeBinding = useMemo(() => createInMemoryCanvasBinding({ nodes: [{ ...TEXT_INPUT_NODE }], edges: [] }), []);
+    const realBinding = useMemo(() => createInMemoryCanvasBinding({ nodes: [{ ...TEXT_INPUT_NODE }], edges: [] }), []);
+    const binding = useRealGateway ? realBinding : fakeBinding;
     const fakeGateway = useMemo(
         () =>
             withGatewayTracing(
@@ -58,9 +68,10 @@ export const AgentHarnessPage = () => {
         [traceReporter]
     );
     const gateway = useRealGateway ? realGateway : fakeGateway;
+    const flowId = useRealGateway ? HARNESS_REAL_FLOW_ID : HARNESS_FAKE_FLOW_ID;
     const executor = useMemo(() => withExecutorTracing(createToolExecutor(), traceReporter), [traceReporter]);
 
-    const { session, send } = useLocatorAgent({ binding, flowId: HARNESS_FLOW_ID, gateway, environment, executor });
+    const { session, send } = useLocatorAgent({ binding, flowId, gateway, environment, executor });
 
     // The in-memory binding has no subscription; poll it (and the observability surfaces)
     // a few times per second — plenty for a dev harness.

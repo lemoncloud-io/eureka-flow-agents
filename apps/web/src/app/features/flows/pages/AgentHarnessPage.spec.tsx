@@ -95,4 +95,52 @@ describe('AgentHarnessPage', () => {
         expect(config).not.toHaveProperty('params');
         expect(JSON.stringify(config ?? {})).not.toMatch(/connection|transport/);
     });
+
+    it('running the fake path first then switching to real does not leak tool messages into the real gateway', async () => {
+        postMock.mockResolvedValue({
+            data: {
+                output: { content: 'I have no way to move nodes myself.' },
+                usage: { promptToken: 8, completionToken: 12 },
+            },
+        });
+
+        render(<AgentHarnessPage />);
+        await flushHydration();
+
+        // Drive the fake gateway's scripted move first — a real ToolExecutor dispatch that
+        // persists a tool-call message under the fake mode's own flowId and actually moves
+        // its binding's node to (110, 200).
+        typeAndSend('move the text input 10px right');
+        await waitFor(() => {
+            expect(screen.getByTestId('node-position').textContent).toMatch(/x=110, y=200/);
+        });
+
+        // Now switch to the real gateway — separate flowId, separate binding.
+        fireEvent.click(screen.getByTestId('real-gateway-toggle'));
+        await flushHydration();
+
+        typeAndSend('Move the text input node 100px to the right.');
+
+        await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+
+        // Completes with plain text — no rehydrated tool message broke the request.
+        await screen.findByText(/I have no way to move nodes myself/);
+
+        // The regression this guards: no "tool messages are not supported" error from
+        // rehydrating the fake mode's persisted assistant/tool messages.
+        expect(screen.queryByText(/tool messages are not supported/i)).toBeNull();
+        expect(screen.queryByText(/text-only/i)).toBeNull();
+
+        // The real mode's own (separate) binding never moved.
+        expect(screen.getByTestId('node-position').textContent).toMatch(/x=100, y=200/);
+
+        // Request shape is still a clean text-only Generate body.
+        const [, body, config] = postMock.mock.calls[0];
+        expect(body).not.toHaveProperty('tools');
+        const bodyJson = JSON.stringify(body);
+        expect(bodyJson).not.toMatch(/functionDeclarations/);
+        expect(bodyJson).not.toMatch(/tool_calls/);
+        expect(config).not.toHaveProperty('params');
+        expect(JSON.stringify(config ?? {})).not.toMatch(/connection|transport/);
+    });
 });
