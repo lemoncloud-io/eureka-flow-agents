@@ -5,12 +5,17 @@ import { createFakeGateway, createInMemoryCanvasBinding, createToolExecutor } fr
 import { AgentPanel } from '../components/AgentPanel';
 import { useAgentEnvironment } from '../hooks/useAgentEnvironment';
 import { useLocatorAgent } from '../hooks/useLocatorAgent';
+import { createGenerateApiSyncLlmGateway } from '../utils';
 import { withExecutorTracing, withGatewayTracing } from '../utils/agentTracing';
 
 import type { NodeData } from '@lemoncloud/eureka-flows-api';
 
 const HARNESS_FLOW_ID = 'agent-harness';
 const TEXT_INPUT_NODE: NodeData = { id: 'text-1', type: 'text-input', position: { x: 100, y: 200 } };
+// The live catalog's default and cheaper than gemini-2.5-flash (docs/browser-agent/foundations/
+// real-llm-tool-verification.md §2); that same pass verified this path is real-API text-only —
+// no tool calling — so no friction picking it here.
+const REAL_GATEWAY_MODEL = 'gpt-5-mini';
 
 /**
  * Dev-only harness route (`/dev/agent-harness`) for real-browser verification of the
@@ -25,9 +30,12 @@ const TEXT_INPUT_NODE: NodeData = { id: 'text-1', type: 'text-input', position: 
  */
 export const AgentHarnessPage = () => {
     const { environment, traceReporter, getTraceEntries } = useAgentEnvironment();
+    // Fake gateway is the default so the scripted scenario below keeps working unchanged;
+    // the real gateway is an opt-in toggle for manual verification against the live backend.
+    const [useRealGateway, setUseRealGateway] = useState(false);
 
     const binding = useMemo(() => createInMemoryCanvasBinding({ nodes: [{ ...TEXT_INPUT_NODE }], edges: [] }), []);
-    const gateway = useMemo(
+    const fakeGateway = useMemo(
         () =>
             withGatewayTracing(
                 createFakeGateway([
@@ -41,6 +49,15 @@ export const AgentHarnessPage = () => {
             ),
         [traceReporter]
     );
+    // Real, text-only eureka-flows-api path (P0/non-WebSocket) — capabilities.toolCalls stays
+    // false, so BaseAgent sends no tool definitions and the model can only reply in prose; see
+    // docs/browser-agent/foundations/real-llm-tool-verification.md. Uses the real authenticated
+    // app API client (@flows/web-core), so toggling this on makes a real network/credit call.
+    const realGateway = useMemo(
+        () => withGatewayTracing(createGenerateApiSyncLlmGateway({ model: REAL_GATEWAY_MODEL }), traceReporter),
+        [traceReporter]
+    );
+    const gateway = useRealGateway ? realGateway : fakeGateway;
     const executor = useMemo(() => withExecutorTracing(createToolExecutor(), traceReporter), [traceReporter]);
 
     const { session, send } = useLocatorAgent({ binding, flowId: HARNESS_FLOW_ID, gateway, environment, executor });
@@ -67,8 +84,19 @@ export const AgentHarnessPage = () => {
         <div style={{ display: 'flex', height: '100vh' }}>
             <div style={{ flex: 1, padding: 24, fontFamily: 'monospace', overflow: 'auto' }}>
                 <h1 style={{ fontSize: 18, marginBottom: 12 }}>Agent Environment Harness (dev only)</h1>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <input
+                        type="checkbox"
+                        data-testid="real-gateway-toggle"
+                        checked={useRealGateway}
+                        onChange={e => setUseRealGateway(e.target.checked)}
+                    />
+                    Use real sync Generate gateway ({REAL_GATEWAY_MODEL}) — makes a real network/credit-spending call
+                </label>
                 <p style={{ marginBottom: 8 }}>
-                    Scenario: ask the agent to move the text input 10px right (fake LLM script). Expected: x: 100 → 110.
+                    {useRealGateway
+                        ? `Real gateway: the model replies in text only (capabilities.toolCalls = false) — it will not move the node.`
+                        : 'Scenario: ask the agent to move the text input 10px right (fake LLM script). Expected: x: 100 → 110.'}
                 </p>
                 <p data-testid="node-position" style={{ marginBottom: 8 }}>
                     node position: x={node.position.x}, y={node.position.y}
