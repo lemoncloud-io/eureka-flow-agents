@@ -12,6 +12,9 @@ interface AgentPanelProps {
     session: SessionState | null;
     /** Emit a user message. The container owns the agent; this panel is a pure view. */
     onSend: (text: string) => void;
+    /** Override the header subtitle (e.g. to reflect which gateway the container wired up).
+     * Defaults to the command-gateway hint text. */
+    subtitle?: string;
 }
 
 /** Messages the user should see: their own turns and the agent's text replies. */
@@ -22,7 +25,7 @@ const isVisible = (m: Message): boolean =>
  * The right-docked assistant panel — a pure view over the agent session: it renders the transcript
  * and emits `onSend`, owning no agent or wiring (a container like `FlowAgentPanel` supplies both).
  */
-export const AgentPanel = ({ session, onSend }: AgentPanelProps) => {
+export const AgentPanel = ({ session, onSend, subtitle }: AgentPanelProps) => {
     const { t } = useTranslation(['flows']);
     const [draft, setDraft] = useState('');
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -70,7 +73,7 @@ export const AgentPanel = ({ session, onSend }: AgentPanelProps) => {
                 <div className="flex min-w-0 flex-col">
                     <span className="text-sm font-semibold text-foreground">{t('agentPanel.title', 'Assistant')}</span>
                     <span className="truncate text-[11px] text-muted-foreground">
-                        {t('agentPanel.subtitle', 'Move nodes with commands like move(Fetch, up, 10).')}
+                        {subtitle ?? t('agentPanel.subtitle', 'Move nodes with commands like move(Fetch, up, 10).')}
                     </span>
                 </div>
             </div>

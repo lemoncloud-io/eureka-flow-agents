@@ -1,0 +1,138 @@
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { FlowAgentPanel } from './FlowAgentPanel';
+
+import type { WorkflowCanvasRef } from './WorkflowCanvas';
+import type { NodeData } from '@lemoncloud/eureka-flows-api';
+import type { RefObject } from 'react';
+
+const postMock = vi.fn();
+// Stub web-core so createGenerateApiSyncLlmGateway's default post (api.post) never makes a
+// real network call — this is a wiring test, not a real-backend smoke test. vi.mock is
+// hoisted above the FlowAgentPanel import below.
+vi.mock('@flows/web-core', () => ({
+    api: { post: (...args: unknown[]) => postMock(...args) },
+}));
+
+/** Minimal fake WorkflowCanvasRef — only what createDesktopCanvasBinding actually calls. */
+const makeCanvasRef = (nodes: NodeData[]): RefObject<WorkflowCanvasRef | null> => {
+    let current = nodes.map(n => ({ ...n }));
+    const ref = {
+        current: {
+            getWorkflow: () => ({ nodes: current, edges: [] }),
+            updateNode: (id: string, updates: Partial<NodeData>) => {
+                current = current.map(n => (n.id === id ? { ...n, ...updates } : n));
+            },
+        } as unknown as WorkflowCanvasRef,
+    };
+    return ref as RefObject<WorkflowCanvasRef | null>;
+};
+
+const flushHydration = () =>
+    act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+    });
+
+const typeAndSend = (text: string) => {
+    const box = screen.getByRole('textbox');
+    fireEvent.change(box, { target: { value: text } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+};
+
+afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    postMock.mockReset();
+    vi.unstubAllEnvs();
+});
+
+describe('FlowAgentPanel', () => {
+    it('flag unset: defaults to the command gateway and can move a node with command syntax', async () => {
+        const canvasRef = makeCanvasRef([
+            { id: 'n1', type: 'http', customLabel: 'Fetch', position: { x: 200, y: 80 } },
+        ]);
+
+        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-default" />);
+        await flushHydration();
+
+        typeAndSend('move(Fetch, up, 10)');
+
+        await waitFor(() => {
+            expect(canvasRef.current?.getWorkflow().nodes[0].position).toEqual({ x: 200, y: 70 });
+        });
+        expect(await screen.findByText(/Moved Fetch/)).toBeTruthy();
+        expect(postMock).not.toHaveBeenCalled();
+    });
+
+    it('flag set to generate-sync: uses the real gateway, plain text, no tool call, clean request', async () => {
+        vi.stubEnv('VITE_AGENT_GATEWAY', 'generate-sync');
+        postMock.mockResolvedValue({
+            data: {
+                output: { content: 'I have no way to move nodes myself.' },
+                usage: { promptToken: 8, completionToken: 12 },
+            },
+        });
+        const canvasRef = makeCanvasRef([{ id: 'text-1', type: 'text-input', position: { x: 100, y: 200 } }]);
+
+        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-real" />);
+        await flushHydration();
+
+        typeAndSend('Move the text input node 100px to the right.');
+
+        await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+
+        await screen.findByText(/I have no way to move nodes myself/);
+
+        // No ToolExecutor dispatch happened — the node never moved.
+        expect(canvasRef.current?.getWorkflow().nodes[0].position).toEqual({ x: 100, y: 200 });
+
+        // No text-only tool-definition error surfaced (distinct from the subtitle's own
+        // "text-only" wording — this matches the actual gateway rejection message).
+        expect(screen.queryByText(/tool (definitions|messages) are not supported/i)).toBeNull();
+
+        const [url, body, config] = postMock.mock.calls[0];
+        expect(url).toBe('/runs/0/generate');
+        expect(body).toMatchObject({ model: 'gpt-5-mini' });
+        expect(body).not.toHaveProperty('tools');
+        const bodyJson = JSON.stringify(body);
+        expect(bodyJson).not.toMatch(/functionDeclarations/);
+        expect(bodyJson).not.toMatch(/tool_calls/);
+        expect(config).not.toHaveProperty('params');
+        expect(JSON.stringify(config ?? {})).not.toMatch(/connection|transport/);
+    });
+
+    it('unknown flag value: falls back to the command gateway', async () => {
+        vi.stubEnv('VITE_AGENT_GATEWAY', 'nonsense');
+        const canvasRef = makeCanvasRef([
+            { id: 'n1', type: 'http', customLabel: 'Fetch', position: { x: 200, y: 80 } },
+        ]);
+
+        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-unknown" />);
+        await flushHydration();
+
+        typeAndSend('move(Fetch, up, 10)');
+
+        await waitFor(() => {
+            expect(canvasRef.current?.getWorkflow().nodes[0].position).toEqual({ x: 200, y: 70 });
+        });
+        expect(postMock).not.toHaveBeenCalled();
+    });
+
+    it('subtitle reflects command vs generate-sync mode', async () => {
+        const canvasRef = makeCanvasRef([]);
+
+        const { unmount } = render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-subtitle-default" />);
+        await flushHydration();
+        expect(screen.getByText(/Move nodes with commands like move\(Fetch, up, 10\)\./)).toBeTruthy();
+        await act(async () => unmount());
+
+        vi.stubEnv('VITE_AGENT_GATEWAY', 'generate-sync');
+        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-subtitle-real" />);
+        await flushHydration();
+        expect(
+            screen.getByText(/Real Generate gateway enabled: replies are text-only and will not move nodes yet\./)
+        ).toBeTruthy();
+    });
+});
