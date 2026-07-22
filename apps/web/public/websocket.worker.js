@@ -104,7 +104,9 @@ const connectWebSocket = config => {
     }
 
     self.postMessage({ type: 'status', status: 'connecting' });
-    self.postMessage({ type: 'log', message: 'Connecting to: ' + wsUrl });
+    // Never log the token: redact its value out of the query string before logging the URL.
+    const redactedUrl = tkn ? wsUrl.replace(authQueryParam + '=' + tkn, authQueryParam + '=[REDACTED]') : wsUrl;
+    self.postMessage({ type: 'log', message: 'Connecting to: ' + redactedUrl });
 
     try {
         ws = new WebSocket(wsUrl);
@@ -193,7 +195,13 @@ self.onmessage = e => {
 
     switch (type) {
         case 'connect':
-            self.postMessage({ type: 'log', message: 'Connect config: ' + JSON.stringify(config) });
+            // Never log the token: redact it out of the config before stringifying.
+            self.postMessage({
+                type: 'log',
+                message:
+                    'Connect config: ' +
+                    JSON.stringify({ ...config, token: config?.token ? '[REDACTED]' : config?.token }),
+            });
             isManualDisconnect = false;
             reconnectAttempts = 0;
             currentConfig = config;

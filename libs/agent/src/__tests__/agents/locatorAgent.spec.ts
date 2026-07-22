@@ -3,12 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { createLocatorAgent } from '../../agents/locatorAgent';
 import { createInMemoryCanvasBinding } from '../../canvas/inMemoryCanvasBinding';
 import { createFakeGateway } from '../../llm/fakeGateway';
-import { createInMemoryStorage } from '../../session/session';
+import { createInMemorySessionStore } from '../../session/session';
 
 import type { CanvasBinding } from '../../canvas/canvasBinding';
 import type { FakeScriptStep } from '../../llm/fakeGateway';
-import type { Chunk, LlmGateway } from '../../llm/llmGateway';
-import type { SessionState, Storage } from '../../session/session';
+import type { ChatRequest, Chunk, LlmGateway } from '../../llm/llmGateway';
+import type { SessionState, SessionStore } from '../../session/session';
 import type { NodeData } from '@lemoncloud/eureka-flows-api';
 
 const makeNode = (id: string, x = 0, y = 0, extra: Partial<NodeData> = {}): NodeData => ({
@@ -26,7 +26,7 @@ const setup = (
 ) => {
     const binding: CanvasBinding = createInMemoryCanvasBinding({ nodes, edges: [] });
     const gateway = createFakeGateway(script);
-    const storage: Storage = createInMemoryStorage();
+    const storage: SessionStore = createInMemorySessionStore();
     const flowId = 'flow-1';
     const agent = createLocatorAgent({
         gateway,
@@ -255,7 +255,7 @@ describe('locator agent — robustness (post-review fixes)', () => {
 
     it('does not apply a move from a response that finished after abort', async () => {
         const binding = createInMemoryCanvasBinding({ nodes: [makeNode('n1', 200, 80)], edges: [] });
-        const storage = createInMemoryStorage();
+        const storage = createInMemorySessionStore();
         let doAbort: () => void = () => undefined;
         const gateway: LlmGateway = {
             async *chat(): AsyncIterable<Chunk> {
@@ -281,7 +281,7 @@ describe('locator agent — robustness (post-review fixes)', () => {
 
     it('leaves an already-applied move applied when aborted on a later iteration', async () => {
         const binding = createInMemoryCanvasBinding({ nodes: [makeNode('n1', 200, 80)], edges: [] });
-        const storage = createInMemoryStorage();
+        const storage = createInMemorySessionStore();
         let doAbort: () => void = () => undefined;
         let calls = 0;
         const gateway: LlmGateway = {
@@ -329,7 +329,7 @@ describe('locator agent — robustness (post-review fixes)', () => {
 
     it('ends in error when the gateway fails (non-abort)', async () => {
         const binding = createInMemoryCanvasBinding({ nodes: [makeNode('n1', 0, 0)], edges: [] });
-        const storage = createInMemoryStorage();
+        const storage = createInMemorySessionStore();
         const gateway: LlmGateway = {
             chat(): AsyncIterable<Chunk> {
                 throw new Error('network boom');
@@ -340,5 +340,101 @@ describe('locator agent — robustness (post-review fixes)', () => {
         const state = storage.load('f') as SessionState;
         expect(state.phase).toBe('error');
         expect(state.error).toMatch(/network boom/);
+    });
+});
+
+describe('locator agent — gateway capability gating (BaseAgent)', () => {
+    it('sends tools: [] when capabilities.toolCalls === false', async () => {
+        const calls: ChatRequest[] = [];
+        const binding = createInMemoryCanvasBinding({
+            nodes: [makeNode('n1', 0, 0, { customLabel: 'Fetch' })],
+            edges: [],
+        });
+        const storage = createInMemorySessionStore();
+        const gateway: LlmGateway = {
+            capabilities: { toolCalls: false },
+            async *chat(req): AsyncIterable<Chunk> {
+                calls.push(req);
+                yield { text: 'ok' };
+                yield { done: true };
+            },
+        };
+        const agent = createLocatorAgent({ gateway, binding, storage, flowId: 'f' });
+
+        await agent.send('hi');
+
+        expect(calls[0].tools).toEqual([]);
+    });
+
+    it('sends the listed tools when capabilities.toolCalls === true', async () => {
+        const calls: ChatRequest[] = [];
+        const binding = createInMemoryCanvasBinding({
+            nodes: [makeNode('n1', 0, 0, { customLabel: 'Fetch' })],
+            edges: [],
+        });
+        const storage = createInMemorySessionStore();
+        const gateway: LlmGateway = {
+            capabilities: { toolCalls: true },
+            async *chat(req): AsyncIterable<Chunk> {
+                calls.push(req);
+                yield { text: 'ok' };
+                yield { done: true };
+            },
+        };
+        const agent = createLocatorAgent({ gateway, binding, storage, flowId: 'f' });
+
+        await agent.send('hi');
+
+        expect(calls[0].tools.map(t => t.name)).toEqual(['list_nodes', 'move_node']);
+    });
+
+    it('sends the listed tools when capabilities is undefined (backward compatible)', async () => {
+        const calls: ChatRequest[] = [];
+        const binding = createInMemoryCanvasBinding({
+            nodes: [makeNode('n1', 0, 0, { customLabel: 'Fetch' })],
+            edges: [],
+        });
+        const storage = createInMemorySessionStore();
+        // No `capabilities` field at all — same shape as today's createCommandLlmGateway.
+        const gateway: LlmGateway = {
+            async *chat(req): AsyncIterable<Chunk> {
+                calls.push(req);
+                yield { text: 'ok' };
+                yield { done: true };
+            },
+        };
+        const agent = createLocatorAgent({ gateway, binding, storage, flowId: 'f' });
+
+        await agent.send('hi');
+
+        expect(calls[0].tools.map(t => t.name)).toEqual(['list_nodes', 'move_node']);
+    });
+
+    it('a text-only gateway that would throw on non-empty tools no longer errors', async () => {
+        const binding = createInMemoryCanvasBinding({
+            nodes: [makeNode('n1', 0, 0, { customLabel: 'Fetch' })],
+            edges: [],
+        });
+        const storage = createInMemorySessionStore();
+        // Mirrors createGeminiLlmGateway/createGenerateApiSyncLlmGateway's real guard: throws if
+        // ever handed tool definitions. Proves BaseAgent no longer trips that guard on turn one.
+        const gateway: LlmGateway = {
+            capabilities: { toolCalls: false },
+            async *chat(req): AsyncIterable<Chunk> {
+                if (req.tools.length > 0) {
+                    throw new Error('text-only gateway: tool definitions are not supported');
+                }
+                yield { text: 'hello from a text-only gateway' };
+                yield { done: true };
+            },
+        };
+        const agent = createLocatorAgent({ gateway, binding, storage, flowId: 'f' });
+
+        await agent.send('hi');
+
+        const state = storage.load('f') as SessionState;
+        expect(state.phase).toBe('done');
+        expect(state.error).toBeUndefined();
+        expect(state.messages.find(m => m.role === 'assistant')?.content).toMatch(/text-only/);
     });
 });
