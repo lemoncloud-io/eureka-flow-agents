@@ -246,13 +246,20 @@ export { createGenerateApiLlmGateway } from './createGenerateApiLlmGateway';
 export type {
     CreateGenerateApiLlmGatewayOptions,
     GenerateConnectionSnapshot,
-    GenerateContent,
     GeneratePostConfig,
     GeneratePostFn,
     GenerateReceiver,
-    GenerateRequestBody,
     GenerateResponse,
 } from './createGenerateApiLlmGateway';
+export { createGenerateApiSyncLlmGateway } from './createGenerateApiSyncLlmGateway';
+export type {
+    CreateGenerateApiSyncLlmGatewayOptions,
+    GenerateSyncPostConfig,
+    GenerateSyncPostFn,
+    GenerateSyncResponse,
+    GenerateSyncUsage,
+} from './createGenerateApiSyncLlmGateway';
+export type { GenerateContent, GenerateRequestBody } from './generateApiRequest';
 
 // ============================================================
 // Input File Upload Utilities

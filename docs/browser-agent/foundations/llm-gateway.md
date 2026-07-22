@@ -66,12 +66,13 @@ denied when the agent lacks the `canModifyCanvas` grant. The current canvas tool
 
 ## 4. Implementations
 
-| Gateway                       | Where                            | Tool calls           | Notes                                                                      |
-| ----------------------------- | -------------------------------- | -------------------- | -------------------------------------------------------------------------- |
-| `createFakeGateway`           | `libs/agent/src/llm/fakeGateway` | yes (scripted)       | Deterministic test double; backs the agent/executor suites.                |
-| `createCommandLlmGateway`     | `apps/web` (Lucas)               | yes (parsed command) | Offline dev gateway — no network, no key; drives the panel today.          |
-| `createGeminiLlmGateway`      | `libs/agent/src/llm`             | **no** (text-only)   | First HTTP provider; see §5.                                               |
-| `createGenerateApiLlmGateway` | `apps/web` (Leon)                | **no** (text-only)   | eureka-flows-api adapter foundation; see §6. Not yet wired into the panel. |
+| Gateway                           | Where                            | Tool calls           | Notes                                                                      |
+| --------------------------------- | -------------------------------- | -------------------- | -------------------------------------------------------------------------- |
+| `createFakeGateway`               | `libs/agent/src/llm/fakeGateway` | yes (scripted)       | Deterministic test double; backs the agent/executor suites.                |
+| `createCommandLlmGateway`         | `apps/web` (Lucas)               | yes (parsed command) | Offline dev gateway — no network, no key; drives the panel today.          |
+| `createGeminiLlmGateway`          | `libs/agent/src/llm`             | **no** (text-only)   | First HTTP provider; see §5.                                               |
+| `createGenerateApiSyncLlmGateway` | `apps/web` (Leon)                | **no** (text-only)   | eureka-flows-api adapter, non-WebSocket path (P0); see §6.1. Not wired in. |
+| `createGenerateApiLlmGateway`     | `apps/web` (Leon)                | **no** (text-only)   | eureka-flows-api adapter, WebSocket/SLS path; see §6.2. Not wired in.      |
 
 ## 5. Gemini provider (text-only)
 
@@ -88,13 +89,74 @@ denied when the agent lacks the `canModifyCanvas` grant. The current canvas tool
 - `capabilities.toolCalls = false`; requests with tool definitions or tool messages are
   rejected loudly. Gemini tool calling is not implemented and not claimed.
 
-## 6. Generate API gateway (eureka-flows-api adapter foundation, item 7)
+## 6. Generate API gateways (eureka-flows-api adapter, item 7)
 
-`createGenerateApiLlmGateway` (`apps/web/src/app/features/flows/utils/`) is the frontend
-adapter foundation for GenAI through **eureka-flows-api**, per Claire's Generate API spec.
-It implements the shared `chat()` contract — same as every other gateway — and is
-**text-only** (`capabilities.toolCalls = false`; requests carrying tool definitions or
-tool messages are rejected, same as Gemini).
+There are now **two** Generate API gateways, split by transport per the 07/21 meeting's P0
+item ("adapt with eureka-flows-api: 1st) without web-socket (ai.model.generate), 2nd) using
+web-socket (sls)"). Both post the same request body (shared via
+`apps/web/.../utils/generateApiRequest.ts`) to `POST /runs/0/generate`, both implement the
+shared `chat()` contract, and both are **text-only** (`capabilities.toolCalls = false`;
+requests carrying tool definitions or tool messages are rejected, same as Gemini). They
+differ only in how the answer comes back:
+
+- **§6.1 `createGenerateApiSyncLlmGateway`** — no `connection`/`transport` params; the
+  answer comes back inline in the HTTP response. This is the P0 gateway, real-API verified.
+- **§6.2 `createGenerateApiLlmGateway`** — `transport=1` + a WebSocket-delivered result via
+  a `GenerateReceiver`; the WS/SLS follow-up. Unchanged by the P0 work; still blocked on a
+  real socket receiver (see §7).
+
+### 6.1 Non-WebSocket / sync gateway (P0 — verified)
+
+`createGenerateApiSyncLlmGateway` (`apps/web/src/app/features/flows/utils/`) is the direct,
+synchronous Generate API path: one `POST /runs/0/generate` with **no** `connection` or
+`transport` param, whose response carries the final model answer inline. No socket, no
+`connectionId`, no `GenerateReceiver` — this gateway has no connection/readiness concept at
+all, unlike §6.2.
+
+**What Phase 0 real-API testing established** (against the actual dev backend, `flw-d1`,
+via an authenticated browser session — a scripted sentinel-token prompt, run with no params
+at all and again with `transport=0` explicitly):
+
+- The HTTP `POST /runs/0/generate` returns **200**, and **blocks until the model finishes**
+  (observed 2.7s–7.2s), rather than ACKing immediately.
+- The response **is** the model's answer: `output.content` (string) and a `text` field both
+  carry it directly — verified via a sentinel token (`EUREKA_SYNC_OK_...`) that round-tripped
+  through `output.content`, `text`, and the raw Gemini `candidate.content.parts[0].text`.
+- No async-ACK envelope: `StatusCode` and `$metadata` (present in the §6.2 WS smoke test)
+  are both **absent** here.
+- `usage` is populated with real, non-deterministic token counts; the response also carries
+  richer fields not needed by the `Chunk` contract (`cost`, `candidate`, `version`, `$run`).
+- **Omitting `transport` and explicitly setting `transport=0` produced identical results** —
+  the gateway therefore sends neither; there is nothing for it to toggle.
+
+Implementation:
+
+- Request mapping is identical to §6.2 and shared via `generateApiRequest.ts`: system
+  messages join with `\n\n` into `system`; a single user message becomes a plain string
+  `prompt`; multi-turn user/assistant messages become `prompt.content` as `GenerateContent[]`
+  (assistant → `model` role); `generation.temperature` → `config.temperature`.
+- Response mapping: `output.content` (string) → text chunk, preferring it over the `text`
+  field; if `output.content` is missing, falls back to `text`; a non-string `output.content`
+  (image) throws a text-only error, same as §6.2. `usage.promptToken`/`inputTokenCount` →
+  `inputTokens`; `usage.completionToken`/`outputTokenCount` → `outputTokens` (falls back to
+  the top-level count fields since some responses carry usage only that way).
+- `AbortSignal` passed straight through to `post`; throws `AbortError` if aborted by the
+  time the response resolves.
+- **Tested with a fake `post` only** (20 cases: capabilities, request mapping, transport
+  params' absence, abort, response mapping incl. both fallbacks, tool rejection). The real
+  backend was hit exactly once, manually, to establish the facts above — not through this
+  gateway's code path, and not repeated in the test suite.
+- **Not wired into `FlowEditorPage`/`AgentPanel` yet** — same standalone relationship
+  `createCommandLlmGateway` has to the panel before being swapped in. Tool calling remains
+  unimplemented and unclaimed; this is still a text-only gateway.
+
+### 6.2 WebSocket/SLS gateway
+
+`createGenerateApiLlmGateway` (`apps/web/src/app/features/flows/utils/`) is the
+WebSocket-delivered Generate API path, per Claire's Generate API spec — unchanged by the P0
+work above. It shares request mapping with §6.1 via `generateApiRequest.ts` but keeps its
+own `GenerateConnectionSnapshot`/`GenerateReceiver` machinery, since it depends on a receiver
+that doesn't exist yet (see §7).
 
 **What real-API smoke testing established** (against the actual dev backend, `flw-d1` /
 `wss-d1`, `connection` param fresh and matching the live socket, `transport=1` set):
@@ -148,7 +210,8 @@ model answer, because no real receiver exists yet to prove that leg.
   it is scheduled.
 - **Generate WebSocket receiver:** the real socket-layer receiver (`libs/socket`) that
   reassembles `json:manifest`/`json:chunk`/`json:complete` frames into a `GenerateResponse`
-  does not exist yet — see §6. This is the actual blocker on a live Generate result.
+  does not exist yet — see §6.2. This is the actual blocker on a live Generate result via
+  that gateway; §6.1's sync gateway has no such blocker.
 - **Capability backfill:** the app's `createCommandLlmGateway` does not declare
   `capabilities` yet (the field is optional for compatibility); worth adding when touched.
 
@@ -156,12 +219,13 @@ model answer, because no real receiver exists yet to prove that leg.
 
 - Unit + integration tests: **133 passing** in `libs/agent` (environment, storage
   contract, http port, gemini gateway, self-check, canvas tools, executor, locator/base
-  agent, fake-gateway→executor) and **111 passing** in `apps/web` (includes the Generate
-  API gateway's fake-only suite and the real-browser Environment verification tests).
+  agent, fake-gateway→executor) and **131 passing** in `apps/web` (includes both Generate
+  API gateways' fake-only suites and the real-browser Environment verification tests).
 - Typecheck, `nx build agent`, and `nx build web` pass on this branch.
-- **No live provider call has been made** through gateway code — Gemini and the Generate
-  API gateway are both verified against scripted/fake responses only. The real-API smoke
-  testing that established §6's facts used throwaway dev-only hooks, not this gateway.
+- **No live provider call has been made** through gateway code — Gemini and both Generate
+  API gateways are verified against scripted/fake responses only. The real-API facts in
+  §6.1 and §6.2 came from manual calls (a browser-console `fetch()` for §6.1, throwaway
+  dev-only hooks for §6.2) made outside either gateway's actual code path.
 - **No full editor E2E has been run.** The Environment self-check
   (`runAgentEnvironmentSelfCheck`) remains callable in the browser as a smoke check for
   localStorage and trace; `/dev/agent-harness` covers a manual real-browser Environment
