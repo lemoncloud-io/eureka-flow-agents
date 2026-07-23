@@ -1,9 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FlowAgentPanel } from './FlowAgentPanel';
 
 import type { WorkflowCanvasRef } from './WorkflowCanvas';
+import type { GenerateReceiver, GenerateResponse } from '../utils/createGenerateApiLlmGateway';
 import type { NodeData } from '@lemoncloud/eureka-flows-api';
 import type { RefObject } from 'react';
 
@@ -40,6 +41,14 @@ const typeAndSend = (text: string) => {
     fireEvent.change(box, { target: { value: text } });
     fireEvent.keyDown(box, { key: 'Enter' });
 };
+
+// Local dev machines may have VITE_AGENT_GATEWAY=generate-ws (or generate-sync) baked into
+// .env.local for live manual testing — Vite loads .env.local regardless of mode, so it would
+// otherwise leak into "flag unset" assertions here. Force a deterministic unset baseline;
+// individual tests still override it with their own vi.stubEnv call.
+beforeEach(() => {
+    vi.stubEnv('VITE_AGENT_GATEWAY', '');
+});
 
 afterEach(() => {
     cleanup();
@@ -134,5 +143,64 @@ describe('FlowAgentPanel', () => {
         expect(
             screen.getByText(/Real Generate gateway enabled: replies are text-only and will not move nodes yet\./)
         ).toBeTruthy();
+    });
+
+    it('flag set to generate-ws: posts with connection/transport params and resolves via the injected receiver', async () => {
+        vi.stubEnv('VITE_AGENT_GATEWAY', 'generate-ws');
+        postMock.mockResolvedValue(undefined); // real backend: the HTTP response is only an ACK
+
+        const waits: string[] = [];
+        const receiver: GenerateReceiver<GenerateResponse> = {
+            wait: async (connectionId, fire) => {
+                waits.push(connectionId);
+                await fire();
+                return { output: { content: 'Streamed over the socket.' } };
+            },
+        };
+
+        const canvasRef = makeCanvasRef([{ id: 'text-1', type: 'text-input', position: { x: 100, y: 200 } }]);
+
+        render(
+            <FlowAgentPanel
+                canvasRef={canvasRef}
+                flowId="f-ws"
+                connectionId="conn-123"
+                isSocketConnected={true}
+                generateReceiver={receiver}
+            />
+        );
+        await flushHydration();
+
+        typeAndSend('Hello');
+
+        await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+        expect(waits).toEqual(['conn-123']);
+
+        await screen.findByText(/Streamed over the socket\./);
+
+        const [url, , config] = postMock.mock.calls[0];
+        expect(url).toBe('/runs/0/generate');
+        expect(config).toMatchObject({ params: { connection: 'conn-123', transport: 1 } });
+    });
+
+    it('flag set to generate-ws but socket not connected: surfaces the gateway error instead of hanging', async () => {
+        vi.stubEnv('VITE_AGENT_GATEWAY', 'generate-ws');
+        const canvasRef = makeCanvasRef([]);
+
+        render(
+            <FlowAgentPanel
+                canvasRef={canvasRef}
+                flowId="f-ws-disconnected"
+                connectionId={null}
+                isSocketConnected={false}
+                generateReceiver={null}
+            />
+        );
+        await flushHydration();
+
+        typeAndSend('Hello');
+
+        await screen.findByText(/flow socket is not connected/i);
+        expect(postMock).not.toHaveBeenCalled();
     });
 });

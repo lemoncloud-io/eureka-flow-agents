@@ -35,6 +35,7 @@ import { ProductProgressBanner } from '../components/ProductProgressBanner';
 import { PublishDialog } from '../components/PublishDialog';
 import { Sidebar } from '../components/Sidebar';
 import { WorkflowCanvas } from '../components/WorkflowCanvas';
+import { useGenerateReceiver } from '../hooks/useGenerateReceiver';
 import { useSocketHandlers } from '../hooks/useSocketHandlers';
 import { useSocketRecorder } from '../hooks/useSocketRecorder';
 
@@ -114,6 +115,11 @@ export const FlowEditorPage = () => {
     const socketRecorder = useSocketRecorder();
     const { record: recordSocketMessage } = socketRecorder;
     const refreshCredits = useCreditsRefresh();
+    const {
+        receiver: generateReceiver,
+        handleMessage: handleGenerateFrame,
+        cancelAll: cancelGenerateWaits,
+    } = useGenerateReceiver();
 
     // Stable identity is required: useInitFlowSocket's dispatch effect lists onMessage
     // in its deps, so an inline arrow would re-run that effect every render and
@@ -121,13 +127,14 @@ export const FlowEditorPage = () => {
     const handleSocketMessage = useCallback(
         (message: WebSocketMessage) => {
             recordSocketMessage(message);
+            handleGenerateFrame(message);
             // Run execution streams trace/message/progress events as nodes consume
             // credits — refresh the balance (debounced) once the run settles.
             if (message.action === 'trace' || message.action === 'message' || message.action === 'progress') {
                 refreshCredits();
             }
         },
-        [recordSocketMessage, refreshCredits]
+        [recordSocketMessage, handleGenerateFrame, refreshCredits]
     );
 
     const setProductProgress = useProductProgressStore(state => state.setProgress);
@@ -168,6 +175,17 @@ export const FlowEditorPage = () => {
         onProductProgress: handleProductProgress,
         onMessage: handleSocketMessage,
     });
+
+    // Per spec: a connection lost mid-Generate-request must surface as a visible failure, not
+    // hang forever — and must not auto-retry. Only fires for genuinely lost connections, not on
+    // mount (isSocketConnected starts false before the first 'connected' status).
+    const wasSocketConnectedRef = useRef(false);
+    useEffect(() => {
+        if (wasSocketConnectedRef.current && !isSocketConnected) {
+            cancelGenerateWaits('WebSocket connection lost — Generate result cannot be delivered');
+        }
+        wasSocketConnectedRef.current = isSocketConnected;
+    }, [isSocketConnected, cancelGenerateWaits]);
 
     const { startTourIfFirstVisit, startTour } = useTour();
 
@@ -918,7 +936,13 @@ export const FlowEditorPage = () => {
             </div>
 
             {/* Always-present agent panel, docked right; the canvas region above shrinks for it */}
-            <FlowAgentPanel canvasRef={canvasRef} flowId={currentFlowId ?? ''} />
+            <FlowAgentPanel
+                canvasRef={canvasRef}
+                flowId={currentFlowId ?? ''}
+                connectionId={socketConnectionId}
+                isSocketConnected={isSocketConnected}
+                generateReceiver={generateReceiver}
+            />
         </div>
     );
 };

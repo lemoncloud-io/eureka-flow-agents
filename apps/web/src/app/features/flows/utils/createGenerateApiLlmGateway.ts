@@ -133,6 +133,19 @@ export const createGenerateApiLlmGateway = (options: CreateGenerateApiLlmGateway
     async function* chat(req: ChatRequest, opts?: { signal?: AbortSignal }): AsyncIterable<Chunk> {
         const { isConnected, connectionId, generateReceiver } = getConnection();
 
+        // TEMPORARY diagnostic (see docs/browser-agent/foundations/websocket-generate-receiver-implementation.md
+        // §6) — confirms chat() was actually reached and which precondition, if any, is failing.
+        // Dev-only (never runs in a production build) and console.warn (not .debug, which Chrome's
+        // "Verbose" console filter hides by default) so it's actually visible when checked live.
+        // Remove once the pre-POST path is confirmed working end to end.
+        if (import.meta.env.DEV) {
+            console.warn('[GenerateApiLlmGateway] chat() reached', {
+                isConnected,
+                connectionId,
+                hasGenerateReceiver: !!generateReceiver,
+            });
+        }
+
         if (!isConnected) {
             throw new Error('Generate API gateway unavailable: the flow socket is not connected');
         }

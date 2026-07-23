@@ -22,10 +22,30 @@ import type {
 const WS_ENDPOINT = import.meta.env.VITE_WS_ENDPOINT || '';
 
 /**
+ * Generate API result frame detection. The real wire action/type name is unconfirmed — the
+ * previously assumed `json:manifest`/`json:chunk`/`json:complete` names came from outdated
+ * internal notes, not the actual Generate API spec (which describes a single `GenerateResponse`
+ * object delivered over the socket, not a chunked stream — see
+ * docs/browser-agent/foundations/websocket-generate-receiver-implementation.md). Since the
+ * action/type name is still unknown, this matches structurally instead: a resolvable
+ * `connectionId` plus an `output` field — a shape no other message type here uses (flow/node/
+ * port/progress/log/trace/product-progress all lack `output`).
+ */
+const hasGenerateResultShape = (payload: Record<string, unknown>): boolean =>
+    typeof payload['output'] === 'object' && payload['output'] !== null;
+
+/** Type guard for a Generate API result frame. */
+export const isGenerateFrameMessage = (message: WebSocketMessage): boolean =>
+    hasGenerateResultShape((message.data ?? {}) as Record<string, unknown>);
+
+/**
  * Parse raw WebSocket message data into WebSocketMessage
  * Only extracts the ID for routing - feature-specific parsing happens in subscribers
+ *
+ * Exported for direct unit testing (see useInitFlowSocket.spec.ts) — not meant to be called
+ * outside this module in app code, use the hook instead.
  */
-const parseWebSocketMessage = (data: unknown): WebSocketMessage | null => {
+export const parseWebSocketMessage = (data: unknown): WebSocketMessage | null => {
     if (typeof data !== 'object' || data === null) {
         return null;
     }
@@ -36,6 +56,21 @@ const parseWebSocketMessage = (data: unknown): WebSocketMessage | null => {
     // are at top level and data.id contains nodeId — merge for uniform access.
     const action = 'action' in msg ? (msg['action'] as string) : undefined;
     let payload: Record<string, unknown>;
+
+    // Generate API result: structural match (connectionId + output), checked before the
+    // trace/message unwrapping below since the wrapping convention (if any) is unconfirmed.
+    // Tries the wrapped `data` field first (matching trace/message's convention), then the
+    // top level, so this works whether or not the result turns out to be wrapped at all.
+    const nestedData = ('data' in msg ? msg['data'] : undefined) as Record<string, unknown> | undefined;
+    const generateCandidate = nestedData && hasGenerateResultShape(nestedData) ? nestedData : msg;
+    if (hasGenerateResultShape(generateCandidate)) {
+        const connectionId = (generateCandidate['connectionId'] as string) || (msg['connectionId'] as string);
+        if (!connectionId) {
+            console.warn('[WS] Generate-shaped frame dropped: missing connectionId.', generateCandidate);
+            return null;
+        }
+        return { id: connectionId, data: generateCandidate, action };
+    }
 
     if (action === 'trace' && 'data' in msg && msg['data']) {
         const nestedData = msg['data'] as Record<string, unknown>;
