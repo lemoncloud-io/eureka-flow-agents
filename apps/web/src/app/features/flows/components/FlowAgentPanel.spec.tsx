@@ -1,12 +1,19 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { getPermissions, useCanvasStore } from '@flows/flows';
+
 import { FlowAgentPanel } from './FlowAgentPanel';
 
 import type { WorkflowCanvasRef } from './WorkflowCanvas';
 import type { GenerateReceiver, GenerateResponse } from '../utils/createGenerateApiLlmGateway';
 import type { NodeData } from '@lemoncloud/eureka-flows-api';
 import type { RefObject } from 'react';
+
+// Full-access permissions (canModifyCanvas/canEditConfig/canEditStructure/canRun all true) —
+// these tests exercise the gateway/tool-call wiring, not permission gating, so grant everything
+// an owner has to preserve pre-existing test behavior (moving nodes via command syntax).
+const TEST_PERMISSIONS = getPermissions('owner');
 
 const postMock = vi.fn();
 // Stub web-core so createGenerateApiSyncLlmGateway's default post (api.post) never makes a
@@ -16,14 +23,22 @@ vi.mock('@flows/web-core', () => ({
     api: { post: (...args: unknown[]) => postMock(...args) },
 }));
 
-/** Minimal fake WorkflowCanvasRef — only what createDesktopCanvasBinding actually calls. */
+/**
+ * Minimal fake WorkflowCanvasRef — only what createDesktopCanvasBinding actually calls.
+ * `createDesktopCanvasBinding.readGraph()` reads from `useCanvasStore`, not the ref (so a write
+ * is visible to the next read within a turn), so the store must be seeded here too — otherwise
+ * `list_nodes()`/`move_node()` see an empty graph regardless of what the ref reports.
+ */
 const makeCanvasRef = (nodes: NodeData[]): RefObject<WorkflowCanvasRef | null> => {
     let current = nodes.map(n => ({ ...n }));
+    useCanvasStore.getState().setNodes(current);
+    useCanvasStore.getState().setConnections([]);
     const ref = {
         current: {
             getWorkflow: () => ({ nodes: current, edges: [] }),
             updateNode: (id: string, updates: Partial<NodeData>) => {
                 current = current.map(n => (n.id === id ? { ...n, ...updates } : n));
+                useCanvasStore.getState().updateNodeData(id, updates);
             },
         } as unknown as WorkflowCanvasRef,
     };
@@ -55,6 +70,8 @@ afterEach(() => {
     localStorage.clear();
     postMock.mockReset();
     vi.unstubAllEnvs();
+    useCanvasStore.getState().setNodes([]);
+    useCanvasStore.getState().setConnections([]);
 });
 
 describe('FlowAgentPanel', () => {
@@ -63,7 +80,7 @@ describe('FlowAgentPanel', () => {
             { id: 'n1', type: 'http', customLabel: 'Fetch', position: { x: 200, y: 80 } },
         ]);
 
-        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-default" />);
+        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-default" permissions={TEST_PERMISSIONS} />);
         await flushHydration();
 
         typeAndSend('move(Fetch, up, 10)');
@@ -85,7 +102,7 @@ describe('FlowAgentPanel', () => {
         });
         const canvasRef = makeCanvasRef([{ id: 'text-1', type: 'text-input', position: { x: 100, y: 200 } }]);
 
-        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-real" />);
+        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-real" permissions={TEST_PERMISSIONS} />);
         await flushHydration();
 
         typeAndSend('Move the text input node 100px to the right.');
@@ -118,7 +135,7 @@ describe('FlowAgentPanel', () => {
             { id: 'n1', type: 'http', customLabel: 'Fetch', position: { x: 200, y: 80 } },
         ]);
 
-        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-unknown" />);
+        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-unknown" permissions={TEST_PERMISSIONS} />);
         await flushHydration();
 
         typeAndSend('move(Fetch, up, 10)');
@@ -132,13 +149,15 @@ describe('FlowAgentPanel', () => {
     it('subtitle reflects command vs generate-sync mode', async () => {
         const canvasRef = makeCanvasRef([]);
 
-        const { unmount } = render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-subtitle-default" />);
+        const { unmount } = render(
+            <FlowAgentPanel canvasRef={canvasRef} flowId="f-subtitle-default" permissions={TEST_PERMISSIONS} />
+        );
         await flushHydration();
         expect(screen.getByText(/Move nodes with commands like move\(Fetch, up, 10\)\./)).toBeTruthy();
         await act(async () => unmount());
 
         vi.stubEnv('VITE_AGENT_GATEWAY', 'generate-sync');
-        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-subtitle-real" />);
+        render(<FlowAgentPanel canvasRef={canvasRef} flowId="f-subtitle-real" permissions={TEST_PERMISSIONS} />);
         await flushHydration();
         expect(
             screen.getByText(/Real Generate gateway enabled: replies are text-only and will not move nodes yet\./)
@@ -167,6 +186,7 @@ describe('FlowAgentPanel', () => {
                 connectionId="conn-123"
                 isSocketConnected={true}
                 generateReceiver={receiver}
+                permissions={TEST_PERMISSIONS}
             />
         );
         await flushHydration();
@@ -194,6 +214,7 @@ describe('FlowAgentPanel', () => {
                 connectionId={null}
                 isSocketConnected={false}
                 generateReceiver={null}
+                permissions={TEST_PERMISSIONS}
             />
         );
         await flushHydration();

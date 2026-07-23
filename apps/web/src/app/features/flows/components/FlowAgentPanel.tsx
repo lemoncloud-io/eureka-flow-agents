@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 
-import { createToolExecutor } from '@flows/agent';
+import { createToolExecutor, toAgentGrant } from '@flows/agent';
 
 import { AgentPanel } from './AgentPanel';
 import { useAgentEnvironment } from '../hooks/useAgentEnvironment';
@@ -15,6 +15,7 @@ import { withExecutorTracing, withGatewayTracing } from '../utils/agentTracing';
 
 import type { WorkflowCanvasRef } from './WorkflowCanvas';
 import type { GenerateReceiver, GenerateResponse } from '../utils/createGenerateApiLlmGateway';
+import type { FlowPermissions } from '@flows/flows';
 import type { RefObject } from 'react';
 
 interface FlowAgentPanelProps {
@@ -27,6 +28,8 @@ interface FlowAgentPanelProps {
     isSocketConnected?: boolean;
     /** Socket-layer receiver for `generate-ws` mode — see {@link useGenerateReceiver}. */
     generateReceiver?: GenerateReceiver<GenerateResponse> | null;
+    /** The flow's live permissions; projected onto the agent grant so its tools match the role. */
+    permissions: FlowPermissions;
 }
 
 // Opt-in real, credit-spending Generate path — same convention as VITE_PROCESS_API
@@ -54,6 +57,7 @@ export const FlowAgentPanel = ({
     connectionId = null,
     isSocketConnected = false,
     generateReceiver = null,
+    permissions,
 }: FlowAgentPanelProps) => {
     const binding = useMemo(() => createDesktopCanvasBinding(canvasRef), [canvasRef]);
     const { environment, traceReporter } = useAgentEnvironment();
@@ -90,8 +94,10 @@ export const FlowAgentPanel = ({
         generateReceiver,
     ]);
     const executor = useMemo(() => withExecutorTracing(createToolExecutor(), traceReporter), [traceReporter]);
+    // Match the agent's tool permissions to the flow's role (a viewer's move_node is denied at the executor).
+    const grant = useMemo(() => toAgentGrant(permissions), [permissions]);
 
-    const { session, send } = useLocatorAgent({ binding, flowId, gateway, environment, executor });
+    const { session, send } = useLocatorAgent({ binding, flowId, gateway, environment, executor, grant });
 
     const subtitle = useWsGenerateGateway
         ? GENERATE_WS_SUBTITLE
