@@ -134,6 +134,22 @@ export type {
     GenerateRequestBody,
     GenerateResponse,
 } from './createGenerateApiLlmGateway';
+export {
+    createEurekaToolCallLlmGateway,
+    EurekaToolCallGatewayError,
+    EurekaToolCallHttpError,
+    EurekaToolCallInvalidResponseError,
+    EurekaToolCallNetworkError,
+    EurekaToolCallProviderError,
+} from './createEurekaToolCallLlmGateway';
+export type {
+    CreateEurekaToolCallLlmGatewayOptions,
+    EurekaToolCallErrorBody,
+    EurekaToolCallErrorResponse,
+    EurekaToolCallRequest,
+    EurekaToolCallResponse,
+    EurekaToolCallSuccessResponse,
+} from './createEurekaToolCallLlmGateway';
 export { createBlockCatalogLookup } from './createBlockCatalogLookup';
 
 // ============================================================
