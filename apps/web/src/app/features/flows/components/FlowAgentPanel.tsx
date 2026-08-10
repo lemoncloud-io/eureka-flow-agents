@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 
 import { createEngineCanvasBinding, toAgentGrant } from '@flows/agent';
 import { useBlockRegistry } from '@flows/flows';
@@ -7,9 +7,16 @@ import { useWebSocketStore } from '@flows/socket';
 import { AgentPanel } from './AgentPanel';
 import { useAgent } from '../hooks/useAgent';
 import { useAgentEnvironment } from '../hooks/useAgentEnvironment';
-import { createBlockCatalogLookup, createEurekaToolCallLlmGateway, createGenerateApiLlmGateway } from '../utils';
+import { useToolSocketConnection } from '../hooks/useToolSocketConnection';
+import {
+    createBlockCatalogLookup,
+    createEurekaToolCallLlmGateway,
+    createFlowJSONTransportReceiver,
+    createGenerateApiLlmGateway,
+} from '../utils';
 import { withGatewayTracing } from '../utils/agentTracing';
 
+import type { GenerateReceiver, GenerateResponse, ToolSocketConnection } from '../utils';
 import type { LlmGateway } from '@flows/agent';
 import type { FlowEngine } from '@flows/engine';
 import type { FlowPermissions } from '@flows/flows';
@@ -22,17 +29,23 @@ interface FlowAgentPanelProps {
     permissions: FlowPermissions;
 }
 
+const EUREKA_AGENTS_API = 'EUREKA_AGENTS_API';
+const gateWay: string = EUREKA_AGENTS_API;
+
 /**
- * Selects the production gateway. Defaults to the existing text-only, socket-delivered
- * {@link createGenerateApiLlmGateway} — unchanged behavior when nothing is configured.
- *
- * Set `VITE_EUREKA_TOOL_CALL_ENDPOINT` to opt into {@link createEurekaToolCallLlmGateway} instead
- * — the tool-capable, non-streaming-HTTP gateway that calls eureka-flows-api's (not yet deployed)
- * tool-calling endpoint. See `docs/browser-agent/foundations/eureka-tool-calling-endpoint-contract.md`.
- * Deliberately off by default: flipping this on before the backend endpoint exists would just
- * turn every agent turn into a guaranteed network error, not a silent no-op.
+ * Selects the production gateway while retaining the pre-Eureka Agents API path as a fallback.
  */
-const createProductionGateway = (): LlmGateway => {
+const createProductionGateway = (
+    connection: ToolSocketConnection,
+    generateReceiver: GenerateReceiver<GenerateResponse>
+): LlmGateway => {
+    if (gateWay === EUREKA_AGENTS_API) {
+        return createGenerateApiLlmGateway({
+            toolCalls: true,
+            getConnection: () => ({ ...connection.getSnapshot(), generateReceiver }),
+        });
+    }
+
     const endpointPath = import.meta.env['VITE_EUREKA_TOOL_CALL_ENDPOINT'] as string | undefined;
     if (!endpointPath) {
         return createGenerateApiLlmGateway({
@@ -53,18 +66,21 @@ const createProductionGateway = (): LlmGateway => {
  * {@link useAgent}, and hands `session` + `send` to the presentational {@link AgentPanel}. All the
  * agent wiring lives here, so FlowEditorPage only mounts `<FlowAgentPanel />`.
  *
- * The gateway is selected by {@link createProductionGateway} — the backend-proxied,
- * socket-delivered {@link createGenerateApiLlmGateway} by default (its result arrives over the
- * live flow socket; the generate receiver + tool calls are pending in the socket layer, so this
- * path is wired but not yet functional end-to-end), or the tool-capable, non-streaming-HTTP
- * {@link createEurekaToolCallLlmGateway} when `VITE_EUREKA_TOOL_CALL_ENDPOINT` is configured.
+ * The gateway is selected by {@link createProductionGateway}. Eureka Agents API uses the dedicated tool socket;
+ * changing `gateWay` restores the pre-branch gateway selection path.
  */
 export const FlowAgentPanel = ({ engine, flowId, permissions }: FlowAgentPanelProps) => {
     // Reads cannot lag a projection that pauses mid-drag; edits land in `transact`, so they
     // checkpoint for undo like a user drag.
     const binding = useMemo(() => createEngineCanvasBinding(engine), [engine]);
     const { environment, traceReporter } = useAgentEnvironment();
-    const gateway = useMemo(() => withGatewayTracing(createProductionGateway(), traceReporter), [traceReporter]);
+    const toolSocket = useToolSocketConnection(gateWay === EUREKA_AGENTS_API);
+    const receiver = useMemo(() => createFlowJSONTransportReceiver(toolSocket), [toolSocket]);
+    useEffect(() => receiver.attach(), [receiver]);
+    const gateway = useMemo(
+        () => withGatewayTracing(createProductionGateway(toolSocket, receiver.generateReceiver), traceReporter),
+        [receiver, toolSocket, traceReporter]
+    );
     // The user's flow-role permissions — the executor's ceiling on every specialist tool (a viewer's
     // move_node/rename is denied there, regardless of each agent's own fixed grant).
     const userPermissions = useMemo(() => toAgentGrant(permissions), [permissions]);
