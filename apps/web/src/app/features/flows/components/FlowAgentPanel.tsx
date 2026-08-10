@@ -2,12 +2,18 @@ import { useEffect, useMemo } from 'react';
 
 import { createEngineCanvasBinding, toAgentGrant } from '@flows/agent';
 import { useBlockRegistry } from '@flows/flows';
+import { useWebSocketStore } from '@flows/socket';
 
 import { AgentPanel } from './AgentPanel';
 import { useAgent } from '../hooks/useAgent';
 import { useAgentEnvironment } from '../hooks/useAgentEnvironment';
 import { useToolSocketConnection } from '../hooks/useToolSocketConnection';
-import { createBlockCatalogLookup, createFlowJSONTransportReceiver, createGenerateApiLlmGateway } from '../utils';
+import {
+    createBlockCatalogLookup,
+    createEurekaToolCallLlmGateway,
+    createFlowJSONTransportReceiver,
+    createGenerateApiLlmGateway,
+} from '../utils';
 import { withGatewayTracing } from '../utils/agentTracing';
 
 import type { GenerateReceiver, GenerateResponse, ToolSocketConnection } from '../utils';
@@ -23,34 +29,52 @@ interface FlowAgentPanelProps {
     permissions: FlowPermissions;
 }
 
+const EUREKA_AGENTS_API = 'EUREKA_AGENTS_API';
+const gateWay: string = EUREKA_AGENTS_API;
+
 /**
- * Builds the production, tool-capable, socket-delivered
- * {@link createGenerateApiLlmGateway} over `POST /runs/0/generate`.
+ * Selects the production gateway while retaining the pre-Eureka Agents API path as a fallback.
  */
 const createProductionGateway = (
     connection: ToolSocketConnection,
     generateReceiver: GenerateReceiver<GenerateResponse>
-): LlmGateway =>
-    createGenerateApiLlmGateway({
-        toolCalls: true,
-        getConnection: () => ({ ...connection.getSnapshot(), generateReceiver }),
-    });
+): LlmGateway => {
+    if (gateWay === EUREKA_AGENTS_API) {
+        return createGenerateApiLlmGateway({
+            toolCalls: true,
+            getConnection: () => ({ ...connection.getSnapshot(), generateReceiver }),
+        });
+    }
+
+    const endpointPath = import.meta.env['VITE_EUREKA_TOOL_CALL_ENDPOINT'] as string | undefined;
+    if (!endpointPath) {
+        return createGenerateApiLlmGateway({
+            getConnection: () => {
+                const { isConnected, id } = useWebSocketStore.getState();
+                return { isConnected, connectionId: id, generateReceiver: null };
+            },
+        });
+    }
+
+    const provider = (import.meta.env['VITE_EUREKA_TOOL_CALL_PROVIDER'] as string | undefined) ?? 'openai';
+    const requestedModel = (import.meta.env['VITE_EUREKA_TOOL_CALL_MODEL'] as string | undefined) ?? 'gpt-4o-mini';
+    return createEurekaToolCallLlmGateway({ provider, requestedModel, endpointPath });
+};
 
 /**
  * App-side container for the **orchestrator** agent: builds the concrete ports, drives the agent via
  * {@link useAgent}, and hands `session` + `send` to the presentational {@link AgentPanel}. All the
  * agent wiring lives here, so FlowEditorPage only mounts `<FlowAgentPanel />`.
  *
- * The gateway is selected by {@link createProductionGateway} — the backend-proxied,
- * socket-delivered, tool-capable {@link createGenerateApiLlmGateway} by default (its result arrives over the
- * live flow socket when a connection ID exists, otherwise over HTTP).
+ * The gateway is selected by {@link createProductionGateway}. Eureka Agents API uses the dedicated tool socket;
+ * changing `gateWay` restores the pre-branch gateway selection path.
  */
 export const FlowAgentPanel = ({ engine, flowId, permissions }: FlowAgentPanelProps) => {
     // Reads cannot lag a projection that pauses mid-drag; edits land in `transact`, so they
     // checkpoint for undo like a user drag.
     const binding = useMemo(() => createEngineCanvasBinding(engine), [engine]);
     const { environment, traceReporter } = useAgentEnvironment();
-    const toolSocket = useToolSocketConnection();
+    const toolSocket = useToolSocketConnection(gateWay === EUREKA_AGENTS_API);
     const receiver = useMemo(() => createFlowJSONTransportReceiver(toolSocket), [toolSocket]);
     useEffect(() => receiver.attach(), [receiver]);
     const gateway = useMemo(
