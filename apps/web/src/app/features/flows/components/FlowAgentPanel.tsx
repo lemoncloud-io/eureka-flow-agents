@@ -2,15 +2,15 @@ import { useEffect, useMemo } from 'react';
 
 import { createEngineCanvasBinding, toAgentGrant } from '@flows/agent';
 import { useBlockRegistry } from '@flows/flows';
-import { useWebSocketStore } from '@flows/socket';
 
 import { AgentPanel } from './AgentPanel';
 import { useAgent } from '../hooks/useAgent';
 import { useAgentEnvironment } from '../hooks/useAgentEnvironment';
+import { useToolSocketConnection } from '../hooks/useToolSocketConnection';
 import { createBlockCatalogLookup, createFlowJSONTransportReceiver, createGenerateApiLlmGateway } from '../utils';
 import { withGatewayTracing } from '../utils/agentTracing';
 
-import type { GenerateReceiver, GenerateResponse } from '../utils';
+import type { GenerateReceiver, GenerateResponse, ToolSocketConnection } from '../utils';
 import type { LlmGateway } from '@flows/agent';
 import type { FlowEngine } from '@flows/engine';
 import type { FlowPermissions } from '@flows/flows';
@@ -27,13 +27,13 @@ interface FlowAgentPanelProps {
  * Builds the production, tool-capable, socket-delivered
  * {@link createGenerateApiLlmGateway} over `POST /runs/0/generate`.
  */
-const createProductionGateway = (generateReceiver: GenerateReceiver<GenerateResponse>): LlmGateway =>
+const createProductionGateway = (
+    connection: ToolSocketConnection,
+    generateReceiver: GenerateReceiver<GenerateResponse>
+): LlmGateway =>
     createGenerateApiLlmGateway({
         toolCalls: true,
-        getConnection: () => {
-            const { isConnected, id } = useWebSocketStore.getState();
-            return { isConnected, connectionId: id, generateReceiver };
-        },
+        getConnection: () => ({ ...connection.getSnapshot(), generateReceiver }),
     });
 
 /**
@@ -50,11 +50,12 @@ export const FlowAgentPanel = ({ engine, flowId, permissions }: FlowAgentPanelPr
     // checkpoint for undo like a user drag.
     const binding = useMemo(() => createEngineCanvasBinding(engine), [engine]);
     const { environment, traceReporter } = useAgentEnvironment();
-    const receiver = useMemo(() => createFlowJSONTransportReceiver(), []);
+    const toolSocket = useToolSocketConnection();
+    const receiver = useMemo(() => createFlowJSONTransportReceiver(toolSocket), [toolSocket]);
     useEffect(() => receiver.attach(), [receiver]);
     const gateway = useMemo(
-        () => withGatewayTracing(createProductionGateway(receiver.generateReceiver), traceReporter),
-        [receiver, traceReporter]
+        () => withGatewayTracing(createProductionGateway(toolSocket, receiver.generateReceiver), traceReporter),
+        [receiver, toolSocket, traceReporter]
     );
     // The user's flow-role permissions — the executor's ceiling on every specialist tool (a viewer's
     // move_node/rename is denied there, regardless of each agent's own fixed grant).
